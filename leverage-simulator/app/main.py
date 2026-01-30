@@ -31,6 +31,9 @@ from src.metrics import (
     calculate_rolling_sharpe,
     calculate_rolling_drawdown,
 )
+from src.indicators import compute_indicators
+from src.rules import RulesEngine
+import re
 
 # Page config
 st.set_page_config(
@@ -53,6 +56,208 @@ def load_data():
     )
     returns = loader.get_returns(data, symbols=["SPY", "GLD", "TLT", "BIL"])
     return data, returns
+
+
+def extract_indicators_from_rule(rule: str) -> dict:
+    """
+    Extract indicator names from a rule string.
+
+    Returns dict with:
+        - smas: list of SMA periods used (e.g., [50, 200])
+        - emas: list of EMA periods used
+        - rsi: RSI period if used, else None
+        - uses_close: whether close price is used
+    """
+    # Find all indicator references like SPY.SMA_200, SPY.RSI_14, etc.
+    pattern = r'(\w+)\.(SMA_(\d+)|EMA_(\d+)|RSI_(\d+)|close)'
+    matches = re.findall(pattern, rule)
+
+    smas = set()
+    emas = set()
+    rsi = None
+    uses_close = False
+
+    for match in matches:
+        if match[1] == 'close':
+            uses_close = True
+        elif match[1].startswith('SMA_'):
+            smas.add(int(match[2]))
+        elif match[1].startswith('EMA_'):
+            emas.add(int(match[3]))
+        elif match[1].startswith('RSI_'):
+            rsi = int(match[4])
+
+    return {
+        'smas': sorted(smas),
+        'emas': sorted(emas),
+        'rsi': rsi,
+        'uses_close': uses_close,
+    }
+
+
+def find_crossovers(series1: pd.Series, series2: pd.Series) -> tuple[pd.DatetimeIndex, pd.DatetimeIndex]:
+    """
+    Find crossover points between two series.
+
+    Returns:
+        Tuple of (cross_above_dates, cross_below_dates)
+        - cross_above: series1 crosses above series2
+        - cross_below: series1 crosses below series2
+    """
+    # series1 > series2
+    above = series1 > series2
+
+    # Find where it changes
+    cross_above = above & ~above.shift(1).fillna(False)  # Was below, now above
+    cross_below = ~above & above.shift(1).fillna(True)   # Was above, now below
+
+    return cross_above[cross_above].index, cross_below[cross_below].index
+
+
+def add_crossover_markers(fig, indicators: pd.DataFrame, signal_asset: str, rule_indicators: dict, row: int = 1):
+    """
+    Add crossover markers to the chart.
+
+    Detects crossovers based on indicators used in the rule:
+    - Price crossing SMAs
+    - SMA crossing another SMA (e.g., Golden Cross)
+    """
+    price_col = f"{signal_asset}.close"
+    price = indicators[price_col]
+
+    markers_added = []
+
+    # Check for price vs SMA crossovers
+    if rule_indicators['uses_close'] and rule_indicators['smas']:
+        for sma_period in rule_indicators['smas']:
+            sma_col = f"{signal_asset}.SMA_{sma_period}"
+            if sma_col in indicators.columns:
+                sma = indicators[sma_col]
+                cross_above, cross_below = find_crossovers(price, sma)
+
+                # Add upward cross markers (green triangles)
+                if len(cross_above) > 0:
+                    fig.add_trace(
+                        go.Scatter(
+                            x=cross_above,
+                            y=price.loc[cross_above],
+                            mode="markers",
+                            marker=dict(
+                                symbol="triangle-up",
+                                size=12,
+                                color="#00E676",  # Bright green
+                                line=dict(width=1, color="#FFFFFF"),
+                            ),
+                            name=f"Cross Above SMA({sma_period})",
+                            hovertemplate=f"Cross Above SMA({sma_period})<br>%{{x}}<br>${{y:.2f}}<extra></extra>",
+                        ),
+                        row=row, col=1
+                    )
+                    markers_added.append(f"price > SMA({sma_period})")
+
+                # Add downward cross markers (red triangles)
+                if len(cross_below) > 0:
+                    fig.add_trace(
+                        go.Scatter(
+                            x=cross_below,
+                            y=price.loc[cross_below],
+                            mode="markers",
+                            marker=dict(
+                                symbol="triangle-down",
+                                size=12,
+                                color="#FF5252",  # Bright red
+                                line=dict(width=1, color="#FFFFFF"),
+                            ),
+                            name=f"Cross Below SMA({sma_period})",
+                            hovertemplate=f"Cross Below SMA({sma_period})<br>%{{x}}<br>${{y:.2f}}<extra></extra>",
+                        ),
+                        row=row, col=1
+                    )
+
+    # Check for SMA vs SMA crossovers (Golden Cross / Death Cross)
+    smas = rule_indicators['smas']
+    if len(smas) >= 2:
+        # Sort to get fast and slow SMAs
+        smas_sorted = sorted(smas)
+        for i, fast_period in enumerate(smas_sorted[:-1]):
+            for slow_period in smas_sorted[i+1:]:
+                fast_col = f"{signal_asset}.SMA_{fast_period}"
+                slow_col = f"{signal_asset}.SMA_{slow_period}"
+
+                if fast_col in indicators.columns and slow_col in indicators.columns:
+                    fast_sma = indicators[fast_col]
+                    slow_sma = indicators[slow_col]
+
+                    cross_above, cross_below = find_crossovers(fast_sma, slow_sma)
+
+                    # Golden Cross (fast crosses above slow)
+                    if len(cross_above) > 0:
+                        fig.add_trace(
+                            go.Scatter(
+                                x=cross_above,
+                                y=fast_sma.loc[cross_above],
+                                mode="markers",
+                                marker=dict(
+                                    symbol="star",
+                                    size=16,
+                                    color="#FFD700",  # Gold
+                                    line=dict(width=1, color="#FFFFFF"),
+                                ),
+                                name=f"Golden Cross ({fast_period}/{slow_period})",
+                                hovertemplate=f"Golden Cross SMA({fast_period})>SMA({slow_period})<br>%{{x}}<extra></extra>",
+                            ),
+                            row=row, col=1
+                        )
+                        markers_added.append(f"SMA({fast_period}) > SMA({slow_period})")
+
+                    # Death Cross (fast crosses below slow)
+                    if len(cross_below) > 0:
+                        fig.add_trace(
+                            go.Scatter(
+                                x=cross_below,
+                                y=fast_sma.loc[cross_below],
+                                mode="markers",
+                                marker=dict(
+                                    symbol="x",
+                                    size=12,
+                                    color="#FF5252",  # Red
+                                    line=dict(width=2, color="#FF5252"),
+                                ),
+                                name=f"Death Cross ({fast_period}/{slow_period})",
+                                hovertemplate=f"Death Cross SMA({fast_period})<SMA({slow_period})<br>%{{x}}<extra></extra>",
+                            ),
+                            row=row, col=1
+                        )
+
+    return fig, markers_added
+
+
+def add_leverage_regions(fig, leverage_series, row=1):
+    """Add shaded regions for leverage ON periods."""
+    # Find contiguous leverage ON regions
+    is_leveraged = leverage_series > 1
+
+    # Find transitions
+    changes = is_leveraged.astype(int).diff().fillna(0)
+    starts = leverage_series.index[changes == 1].tolist()
+    ends = leverage_series.index[changes == -1].tolist()
+
+    # Handle edge cases
+    if is_leveraged.iloc[0]:
+        starts = [leverage_series.index[0]] + starts
+    if is_leveraged.iloc[-1]:
+        ends = ends + [leverage_series.index[-1]]
+
+    # Add shaded regions - using a teal/cyan that's visible on both light and dark
+    for start, end in zip(starts, ends):
+        fig.add_vrect(
+            x0=start, x1=end,
+            fillcolor="#4DD0E1", opacity=0.15,  # Cyan for dark mode visibility
+            layer="below", line_width=0,
+            row=row, col=1,
+        )
+
+    return fig
 
 
 # Load data
@@ -213,8 +418,8 @@ if run_backtest:
             st.stop()
 
     # Display results
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
-        "📊 Summary", "📈 Equity Curve", "📉 Drawdown", "⚙️ Leverage", "💰 Interest"
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+        "📊 Summary", "📈 Equity Curve", "🎯 Signals & Indicators", "📉 Drawdown", "⚙️ Leverage", "💰 Interest"
     ])
 
     with tab1:
@@ -270,19 +475,144 @@ if run_backtest:
             st.dataframe(lev_df, hide_index=True, use_container_width=True)
 
     with tab2:
-        # Equity curve chart
-        fig = make_subplots(rows=2, cols=1, row_heights=[0.7, 0.3],
-                          shared_xaxes=True, vertical_spacing=0.05)
+        # Extract which indicators are used in the rule
+        rule_indicators = extract_indicators_from_rule(leverage_rule)
 
-        # Strategy equity
+        # Compute indicators for the signal asset
+        indicators = compute_indicators(
+            data.loc[result.equity_curve.index],
+            symbols=[signal_asset],
+            sma_windows=config.sma_windows,
+            ema_windows=config.ema_windows,
+            rsi_period=config.rsi_period,
+        )
+
+        # Get the leverage signal
+        rules_engine = RulesEngine(indicators)
+        leverage_signal = rules_engine.evaluate(leverage_rule)
+
+        # Determine subplot layout based on whether RSI is used
+        has_rsi = rule_indicators['rsi'] is not None
+
+        if has_rsi:
+            fig = make_subplots(
+                rows=4, cols=1,
+                row_heights=[0.35, 0.15, 0.35, 0.15],
+                shared_xaxes=True,
+                vertical_spacing=0.03,
+                subplot_titles=(
+                    f"{signal_asset} Price & Indicators",
+                    f"RSI({rule_indicators['rsi']})",
+                    "Portfolio Equity",
+                    "Leverage"
+                )
+            )
+            equity_row = 3
+            leverage_row = 4
+        else:
+            fig = make_subplots(
+                rows=3, cols=1,
+                row_heights=[0.45, 0.40, 0.15],
+                shared_xaxes=True,
+                vertical_spacing=0.03,
+                subplot_titles=(
+                    f"{signal_asset} Price & Indicators",
+                    "Portfolio Equity",
+                    "Leverage"
+                )
+            )
+            equity_row = 2
+            leverage_row = 3
+
+        # === Row 1: Signal Asset Price with Indicators ===
+        # Colors optimized for dark mode
+        price_col = f"{signal_asset}.close"
+        fig.add_trace(
+            go.Scatter(
+                x=indicators.index,
+                y=indicators[price_col],
+                name=f"{signal_asset} Price",
+                line=dict(color="#E0E0E0", width=1.5),  # Light gray for dark mode
+            ),
+            row=1, col=1
+        )
+
+        # Add SMAs used in rule (highlighted) and others (dimmed)
+        # Bright colors for dark mode visibility
+        sma_colors = {20: "#FFA726", 50: "#42A5F5", 200: "#EF5350"}  # Orange, Blue, Red
+        for sma_period in config.sma_windows:
+            sma_col = f"{signal_asset}.SMA_{sma_period}"
+            if sma_col in indicators.columns:
+                is_used = sma_period in rule_indicators['smas']
+                fig.add_trace(
+                    go.Scatter(
+                        x=indicators.index,
+                        y=indicators[sma_col],
+                        name=f"SMA({sma_period})",
+                        line=dict(
+                            color=sma_colors.get(sma_period, "#CE93D8"),  # Light purple fallback
+                            width=2.5 if is_used else 1,
+                            dash="solid" if is_used else "dot",
+                        ),
+                        opacity=1.0 if is_used else 0.5,
+                    ),
+                    row=1, col=1
+                )
+
+        # Add EMAs if used in rule
+        ema_colors = {12: "#66BB6A", 26: "#26A69A"}  # Green, Teal
+        for ema_period in config.ema_windows:
+            ema_col = f"{signal_asset}.EMA_{ema_period}"
+            if ema_col in indicators.columns:
+                is_used = ema_period in rule_indicators['emas']
+                if is_used:
+                    fig.add_trace(
+                        go.Scatter(
+                            x=indicators.index,
+                            y=indicators[ema_col],
+                            name=f"EMA({ema_period})",
+                            line=dict(
+                                color=ema_colors.get(ema_period, "#80DEEA"),  # Cyan fallback
+                                width=2.5,
+                            ),
+                        ),
+                        row=1, col=1
+                    )
+
+        # Add crossover markers (price crosses SMA, SMA crosses SMA)
+        fig, markers_added = add_crossover_markers(fig, indicators, signal_asset, rule_indicators, row=1)
+
+        # Add leverage ON shading to price chart
+        fig = add_leverage_regions(fig, result.leverage_series, row=1)
+
+        # === Row 2: RSI (if used) ===
+        if has_rsi:
+            rsi_col = f"{signal_asset}.RSI_{rule_indicators['rsi']}"
+            if rsi_col in indicators.columns:
+                fig.add_trace(
+                    go.Scatter(
+                        x=indicators.index,
+                        y=indicators[rsi_col],
+                        name=f"RSI({rule_indicators['rsi']})",
+                        line=dict(color="#BB86FC", width=1.5),  # Material purple for dark mode
+                        showlegend=True,
+                    ),
+                    row=2, col=1
+                )
+                # Add overbought/oversold lines with dark mode colors
+                fig.add_hline(y=70, line_dash="dash", line_color="#EF5350", opacity=0.7, row=2, col=1)
+                fig.add_hline(y=30, line_dash="dash", line_color="#66BB6A", opacity=0.7, row=2, col=1)
+                fig.add_hline(y=50, line_dash="dot", line_color="#9E9E9E", opacity=0.5, row=2, col=1)
+
+        # === Equity Row: Portfolio Equity ===
         fig.add_trace(
             go.Scatter(
                 x=result.equity_curve.index,
                 y=result.equity_curve.values,
-                name="Strategy",
-                line=dict(color="blue"),
+                name="Strategy Equity",
+                line=dict(color="#2196F3", width=2),  # Bright blue
             ),
-            row=1, col=1
+            row=equity_row, col=1
         )
 
         # Benchmark
@@ -292,35 +622,237 @@ if run_backtest:
                 x=benchmark_equity.index,
                 y=benchmark_equity.values,
                 name=f"{signal_asset} B&H",
-                line=dict(color="gray", dash="dash"),
+                line=dict(color="#9E9E9E", dash="dash", width=1.5),  # Medium gray
             ),
-            row=1, col=1
+            row=equity_row, col=1
         )
 
-        # Leverage
+        # Add leverage shading to equity curve
+        fig = add_leverage_regions(fig, result.leverage_series, row=equity_row)
+
+        # === Leverage Row ===
         fig.add_trace(
             go.Scatter(
                 x=result.leverage_series.index,
                 y=result.leverage_series.values,
                 name="Leverage",
-                line=dict(color="orange"),
+                line=dict(color="#FFB74D"),  # Amber/orange
                 fill="tozeroy",
+                fillcolor="rgba(255, 183, 77, 0.4)",
             ),
-            row=2, col=1
+            row=leverage_row, col=1
         )
 
+        # Update layout
         fig.update_layout(
-            title="Portfolio Equity Curve",
-            height=600,
+            height=900 if has_rsi else 750,
             showlegend=True,
             legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01),
+            hovermode="x unified",
         )
-        fig.update_yaxes(title_text="Equity ($)", row=1, col=1)
-        fig.update_yaxes(title_text="Leverage", row=2, col=1)
+
+        fig.update_yaxes(title_text="Price ($)", row=1, col=1)
+        if has_rsi:
+            fig.update_yaxes(title_text="RSI", range=[0, 100], row=2, col=1)
+        fig.update_yaxes(title_text="Equity ($)", row=equity_row, col=1)
+        fig.update_yaxes(title_text="Leverage", row=leverage_row, col=1)
 
         st.plotly_chart(fig, use_container_width=True)
 
+        # Legend explanation
+        st.caption("💡 Green shaded areas indicate periods when leverage is ON. Solid indicator lines are used in the rule; dotted lines are available but not used.")
+
     with tab3:
+        # Signals & Indicators tab
+        st.markdown("### Signal Asset Price with Indicators")
+        st.markdown(f"**Rule:** `{leverage_rule}`")
+
+        # Extract which indicators are used in the rule
+        rule_indicators = extract_indicators_from_rule(leverage_rule)
+
+        # Compute indicators for the signal asset
+        indicators = compute_indicators(
+            data.loc[result.equity_curve.index],
+            symbols=[signal_asset],
+            sma_windows=config.sma_windows,
+            ema_windows=config.ema_windows,
+            rsi_period=config.rsi_period,
+        )
+
+        # Get the leverage signal
+        rules_engine = RulesEngine(indicators)
+        leverage_signal = rules_engine.evaluate(leverage_rule)
+
+        # Determine subplot layout based on whether RSI is used
+        has_rsi = rule_indicators['rsi'] is not None
+        if has_rsi:
+            fig = make_subplots(
+                rows=3, cols=1,
+                row_heights=[0.6, 0.25, 0.15],
+                shared_xaxes=True,
+                vertical_spacing=0.03,
+                subplot_titles=(f"{signal_asset} Price & Moving Averages", "RSI", "Leverage Signal")
+            )
+        else:
+            fig = make_subplots(
+                rows=2, cols=1,
+                row_heights=[0.75, 0.25],
+                shared_xaxes=True,
+                vertical_spacing=0.05,
+                subplot_titles=(f"{signal_asset} Price & Moving Averages", "Leverage Signal")
+            )
+
+        # Price line - dark mode optimized
+        price_col = f"{signal_asset}.close"
+        fig.add_trace(
+            go.Scatter(
+                x=indicators.index,
+                y=indicators[price_col],
+                name="Price",
+                line=dict(color="#E0E0E0", width=1.5),  # Light gray
+            ),
+            row=1, col=1
+        )
+
+        # Add SMAs used in rule (highlight) and others (dimmed) - dark mode colors
+        sma_colors = {20: "#FFA726", 50: "#42A5F5", 200: "#EF5350"}
+        for sma_period in config.sma_windows:
+            sma_col = f"{signal_asset}.SMA_{sma_period}"
+            if sma_col in indicators.columns:
+                is_used = sma_period in rule_indicators['smas']
+                fig.add_trace(
+                    go.Scatter(
+                        x=indicators.index,
+                        y=indicators[sma_col],
+                        name=f"SMA({sma_period})",
+                        line=dict(
+                            color=sma_colors.get(sma_period, "#CE93D8"),
+                            width=2.5 if is_used else 1,
+                            dash="solid" if is_used else "dot",
+                        ),
+                        opacity=1.0 if is_used else 0.5,
+                    ),
+                    row=1, col=1
+                )
+
+        # Add EMAs if used - dark mode colors
+        ema_colors = {12: "#66BB6A", 26: "#26A69A"}
+        for ema_period in config.ema_windows:
+            ema_col = f"{signal_asset}.EMA_{ema_period}"
+            if ema_col in indicators.columns:
+                is_used = ema_period in rule_indicators['emas']
+                if is_used:  # Only show if used in rule
+                    fig.add_trace(
+                        go.Scatter(
+                            x=indicators.index,
+                            y=indicators[ema_col],
+                            name=f"EMA({ema_period})",
+                            line=dict(
+                                color=ema_colors.get(ema_period, "#80DEEA"),
+                                width=2.5,
+                            ),
+                        ),
+                        row=1, col=1
+                    )
+
+        # Add crossover markers
+        fig, _ = add_crossover_markers(fig, indicators, signal_asset, rule_indicators, row=1)
+
+        # Add leverage ON shading to price chart
+        fig = add_leverage_regions(fig, result.leverage_series, row=1)
+
+        # RSI subplot if used - dark mode colors
+        if has_rsi:
+            rsi_col = f"{signal_asset}.RSI_{rule_indicators['rsi']}"
+            if rsi_col in indicators.columns:
+                fig.add_trace(
+                    go.Scatter(
+                        x=indicators.index,
+                        y=indicators[rsi_col],
+                        name=f"RSI({rule_indicators['rsi']})",
+                        line=dict(color="#BB86FC", width=1.5),  # Material purple
+                    ),
+                    row=2, col=1
+                )
+                # Add overbought/oversold lines - dark mode colors
+                fig.add_hline(y=70, line_dash="dash", line_color="#EF5350", opacity=0.7, row=2, col=1)
+                fig.add_hline(y=30, line_dash="dash", line_color="#66BB6A", opacity=0.7, row=2, col=1)
+                fig.add_hline(y=50, line_dash="dot", line_color="#9E9E9E", opacity=0.5, row=2, col=1)
+
+            # Leverage signal on row 3
+            signal_row = 3
+        else:
+            signal_row = 2
+
+        # Leverage signal (binary) - dark mode colors
+        fig.add_trace(
+            go.Scatter(
+                x=leverage_signal.index,
+                y=leverage_signal.astype(int),
+                name="Leverage ON",
+                fill="tozeroy",
+                line=dict(color="#4DD0E1", width=1),  # Cyan
+                fillcolor="rgba(77, 208, 225, 0.4)",
+            ),
+            row=signal_row, col=1
+        )
+
+        # Update layout
+        fig.update_layout(
+            height=700 if has_rsi else 550,
+            showlegend=True,
+            legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01),
+            hovermode="x unified",
+        )
+
+        fig.update_yaxes(title_text="Price ($)", row=1, col=1)
+        if has_rsi:
+            fig.update_yaxes(title_text="RSI", range=[0, 100], row=2, col=1)
+            fig.update_yaxes(title_text="Signal", range=[-0.1, 1.1], row=3, col=1)
+        else:
+            fig.update_yaxes(title_text="Signal", range=[-0.1, 1.1], row=2, col=1)
+
+        st.plotly_chart(fig, use_container_width=True)
+
+        # Signal statistics
+        st.markdown("### Signal Statistics")
+        col1, col2, col3, col4 = st.columns(4)
+
+        signal_on_pct = leverage_signal.mean() * 100
+        signal_changes = leverage_signal.astype(int).diff().abs().sum()
+
+        col1.metric("Signal ON", f"{signal_on_pct:.1f}%")
+        col2.metric("Signal OFF", f"{100 - signal_on_pct:.1f}%")
+        col3.metric("Signal Changes", f"{int(signal_changes)}")
+        col4.metric("Avg Days per State", f"{len(leverage_signal) / max(signal_changes, 1):.0f}")
+
+        # Show indicator values at key points
+        st.markdown("### Current Indicator Values")
+        latest_idx = indicators.index[-1]
+
+        indicator_values = {}
+        indicator_values["Price"] = f"${indicators.loc[latest_idx, f'{signal_asset}.close']:.2f}"
+
+        for sma in config.sma_windows:
+            col = f"{signal_asset}.SMA_{sma}"
+            if col in indicators.columns:
+                val = indicators.loc[latest_idx, col]
+                indicator_values[f"SMA({sma})"] = f"${val:.2f}"
+
+        if has_rsi:
+            rsi_col = f"{signal_asset}.RSI_{rule_indicators['rsi']}"
+            if rsi_col in indicators.columns:
+                indicator_values[f"RSI({rule_indicators['rsi']})"] = f"{indicators.loc[latest_idx, rsi_col]:.1f}"
+
+        indicator_values["Signal"] = "ON" if leverage_signal.iloc[-1] else "OFF"
+
+        st.dataframe(
+            pd.DataFrame([indicator_values]),
+            hide_index=True,
+            use_container_width=True
+        )
+
+    with tab4:
         # Drawdown chart
         fig = go.Figure()
 
@@ -377,7 +909,7 @@ if run_backtest:
 
         st.plotly_chart(fig, use_container_width=True)
 
-    with tab4:
+    with tab5:
         # Leverage over time
         fig = go.Figure()
 
@@ -425,7 +957,7 @@ if run_backtest:
             fig.update_layout(title="Asset Weights Over Time", yaxis_title="Weight (%)")
             st.plotly_chart(fig, use_container_width=True)
 
-    with tab5:
+    with tab6:
         # Interest costs
         col1, col2 = st.columns(2)
 
