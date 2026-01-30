@@ -19,24 +19,33 @@ A local research tool for simulating leveraged portfolio strategies based on tec
 # Clone and enter directory
 cd leverage-simulator
 
-# Run the app (creates venv automatically)
+# Run with Docker (default)
 ./run.sh
+
+# Or run with local Python venv
+./run.sh --local
 ```
 
 Then open http://localhost:8501 in your browser.
 
-## Manual Setup
+## Running Options
+
+### Docker (Default)
+
+Requires Docker installed. Data is persisted in `data/` and `exports/` directories.
 
 ```bash
-# Create virtual environment
-python3 -m venv venv
-source venv/bin/activate
+./run.sh                      # Run with Docker
+docker compose up -d          # Run in background
+docker compose down           # Stop
+```
 
-# Install dependencies
-pip install -r requirements.txt
+### Local Python
 
-# Run Streamlit app
-streamlit run app/main.py
+Requires Python 3.10+. Creates a virtual environment automatically.
+
+```bash
+./run.sh --local              # Run with venv
 ```
 
 ## Configuration
