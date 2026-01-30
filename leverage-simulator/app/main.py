@@ -232,6 +232,142 @@ def add_crossover_markers(fig, indicators: pd.DataFrame, signal_asset: str, rule
     return fig, markers_added
 
 
+def create_transaction_log(result, initial_equity: float) -> pd.DataFrame:
+    """
+    Create a transaction log from backtest results.
+
+    Returns DataFrame with columns:
+    - Date, Type, Details, Leverage, Equity, Daily P&L
+    """
+    transactions = []
+
+    # Track leverage state changes
+    leverage = result.leverage_series
+    leverage_changes = leverage.diff().fillna(0)
+
+    prev_equity = initial_equity
+
+    for i, date in enumerate(result.equity_curve.index):
+        equity = result.equity_curve.iloc[i]
+        daily_pnl = equity - prev_equity if i > 0 else 0
+        lev = leverage.iloc[i]
+
+        # Check for leverage state change
+        if i > 0:
+            prev_lev = leverage.iloc[i-1]
+            if lev > 1 and prev_lev <= 1:
+                transactions.append({
+                    'Date': date,
+                    'Type': 'Leverage ON',
+                    'Details': f'Leverage increased to {lev:.2f}x',
+                    'Leverage': lev,
+                    'Equity': equity,
+                    'Daily P&L': daily_pnl,
+                })
+            elif lev <= 1 and prev_lev > 1:
+                transactions.append({
+                    'Date': date,
+                    'Type': 'Leverage OFF',
+                    'Details': f'Leverage reduced to {lev:.2f}x',
+                    'Leverage': lev,
+                    'Equity': equity,
+                    'Daily P&L': daily_pnl,
+                })
+
+        # Check for margin call
+        if date in result.margin_events:
+            transactions.append({
+                'Date': date,
+                'Type': 'MARGIN CALL',
+                'Details': 'Forced deleveraging due to margin breach',
+                'Leverage': lev,
+                'Equity': equity,
+                'Daily P&L': daily_pnl,
+            })
+
+        # Check for rebalance
+        if date in result.rebalance_dates:
+            weights = result.weights.loc[date]
+            weight_str = ', '.join([f"{k}:{v:.0%}" for k, v in weights.items() if v > 0])
+            transactions.append({
+                'Date': date,
+                'Type': 'Rebalance',
+                'Details': weight_str,
+                'Leverage': lev,
+                'Equity': equity,
+                'Daily P&L': daily_pnl,
+            })
+
+        prev_equity = equity
+
+    df = pd.DataFrame(transactions)
+    if len(df) > 0:
+        df['Date'] = pd.to_datetime(df['Date']).dt.strftime('%Y-%m-%d')
+        df['Equity'] = df['Equity'].apply(lambda x: f"${x:,.0f}")
+        df['Daily P&L'] = df['Daily P&L'].apply(lambda x: f"${x:+,.0f}")
+        df['Leverage'] = df['Leverage'].apply(lambda x: f"{x:.2f}x")
+
+    return df
+
+
+def calculate_yearly_returns(equity_curve: pd.Series, benchmark_prices: pd.Series, initial_equity: float) -> pd.DataFrame:
+    """
+    Calculate yearly returns for strategy and benchmark.
+
+    Returns DataFrame with Year, Strategy Return, Benchmark Return, Alpha
+    """
+    # Calculate benchmark equity curve
+    benchmark_equity = benchmark_prices / benchmark_prices.iloc[0] * initial_equity
+
+    # Group by year
+    strategy_yearly = equity_curve.groupby(equity_curve.index.year)
+    benchmark_yearly = benchmark_equity.groupby(benchmark_equity.index.year)
+
+    years = sorted(equity_curve.index.year.unique())
+
+    rows = []
+    for year in years:
+        # Get year's data
+        strat_year = equity_curve[equity_curve.index.year == year]
+        bench_year = benchmark_equity[benchmark_equity.index.year == year]
+
+        if len(strat_year) < 2 or len(bench_year) < 2:
+            continue
+
+        # Calculate returns
+        strat_return = (strat_year.iloc[-1] / strat_year.iloc[0] - 1) * 100
+        bench_return = (bench_year.iloc[-1] / bench_year.iloc[0] - 1) * 100
+        alpha = strat_return - bench_return
+
+        rows.append({
+            'Year': year,
+            'Strategy': f"{strat_return:+.1f}%",
+            'Benchmark': f"{bench_return:+.1f}%",
+            'Alpha': f"{alpha:+.1f}%",
+            '_strat_val': strat_return,  # For coloring
+            '_bench_val': bench_return,
+            '_alpha_val': alpha,
+        })
+
+    # Add total row
+    if len(equity_curve) > 0 and len(benchmark_equity) > 0:
+        total_strat = (equity_curve.iloc[-1] / equity_curve.iloc[0] - 1) * 100
+        total_bench = (benchmark_equity.iloc[-1] / benchmark_equity.iloc[0] - 1) * 100
+        total_alpha = total_strat - total_bench
+
+        rows.append({
+            'Year': 'TOTAL',
+            'Strategy': f"{total_strat:+.1f}%",
+            'Benchmark': f"{total_bench:+.1f}%",
+            'Alpha': f"{total_alpha:+.1f}%",
+            '_strat_val': total_strat,
+            '_bench_val': total_bench,
+            '_alpha_val': total_alpha,
+        })
+
+    return pd.DataFrame(rows)
+
+
 def add_leverage_regions(fig, leverage_series, row=1):
     """Add shaded regions for leverage ON periods."""
     # Find contiguous leverage ON regions
@@ -474,6 +610,49 @@ if run_backtest:
             })
             st.dataframe(lev_df, hide_index=True, use_container_width=True)
 
+        # Yearly P&L Comparison
+        st.markdown("---")
+        st.markdown("### Yearly Performance vs SPY Benchmark")
+
+        yearly_df = calculate_yearly_returns(result.equity_curve, spy_prices, initial_equity)
+
+        if len(yearly_df) > 0:
+            # Style the dataframe with colors
+            def color_returns(val):
+                if isinstance(val, str) and '%' in val:
+                    num = float(val.replace('%', '').replace('+', ''))
+                    if num > 0:
+                        return 'color: #66BB6A'  # Green
+                    elif num < 0:
+                        return 'color: #EF5350'  # Red
+                return ''
+
+            # Display table
+            display_df = yearly_df[['Year', 'Strategy', 'Benchmark', 'Alpha']].copy()
+
+            st.dataframe(
+                display_df.style.applymap(color_returns, subset=['Strategy', 'Benchmark', 'Alpha']),
+                hide_index=True,
+                use_container_width=True,
+                height=min(400, (len(display_df) + 1) * 35 + 10),
+            )
+
+            # Summary stats
+            col1, col2, col3 = st.columns(3)
+
+            # Calculate win rate (years strategy beat benchmark)
+            yearly_only = yearly_df[yearly_df['Year'] != 'TOTAL']
+            if len(yearly_only) > 0:
+                years_won = (yearly_only['_alpha_val'] > 0).sum()
+                total_years = len(yearly_only)
+                col1.metric("Years Beat Benchmark", f"{years_won} / {total_years}")
+
+                avg_alpha = yearly_only['_alpha_val'].mean()
+                col2.metric("Avg Yearly Alpha", f"{avg_alpha:+.1f}%")
+
+                best_year = yearly_only.loc[yearly_only['_strat_val'].idxmax()]
+                col3.metric(f"Best Year ({int(best_year['Year'])})", best_year['Strategy'])
+
     with tab2:
         # Extract which indicators are used in the rule
         rule_indicators = extract_indicators_from_rule(leverage_rule)
@@ -660,7 +839,39 @@ if run_backtest:
         st.plotly_chart(fig, use_container_width=True)
 
         # Legend explanation
-        st.caption("💡 Green shaded areas indicate periods when leverage is ON. Solid indicator lines are used in the rule; dotted lines are available but not used.")
+        st.caption("💡 Cyan shaded areas indicate periods when leverage is ON. Solid indicator lines are used in the rule; dotted lines are available but not used.")
+
+        # Transaction Log
+        st.markdown("---")
+        st.markdown("### Transaction Log")
+
+        transaction_log = create_transaction_log(result, initial_equity)
+
+        if len(transaction_log) > 0:
+            # Filter options
+            col1, col2 = st.columns([1, 3])
+            with col1:
+                tx_filter = st.selectbox(
+                    "Filter by type",
+                    ["All", "Leverage ON", "Leverage OFF", "Rebalance", "MARGIN CALL"],
+                    key="tx_filter"
+                )
+
+            if tx_filter != "All":
+                filtered_log = transaction_log[transaction_log['Type'] == tx_filter]
+            else:
+                filtered_log = transaction_log
+
+            st.dataframe(
+                filtered_log[['Date', 'Type', 'Details', 'Leverage', 'Equity', 'Daily P&L']],
+                hide_index=True,
+                use_container_width=True,
+                height=300,
+            )
+
+            st.caption(f"Total transactions: {len(filtered_log)} (showing {tx_filter.lower()})")
+        else:
+            st.info("No transactions recorded.")
 
     with tab3:
         # Signals & Indicators tab
