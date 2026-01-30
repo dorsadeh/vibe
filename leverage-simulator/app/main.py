@@ -848,28 +848,34 @@ if run_backtest:
         transaction_log = create_transaction_log(result, initial_equity)
 
         if len(transaction_log) > 0:
-            # Filter options
-            col1, col2 = st.columns([1, 3])
-            with col1:
-                tx_filter = st.selectbox(
-                    "Filter by type",
-                    ["All", "Leverage ON", "Leverage OFF", "Rebalance", "MARGIN CALL"],
-                    key="tx_filter"
-                )
+            # Filter options with checkboxes
+            st.markdown("**Filter by type:**")
+            tx_types = ["Leverage ON", "Leverage OFF", "Rebalance", "MARGIN CALL"]
+            cols = st.columns(len(tx_types))
 
-            if tx_filter != "All":
-                filtered_log = transaction_log[transaction_log['Type'] == tx_filter]
+            selected_types = []
+            for i, tx_type in enumerate(tx_types):
+                with cols[i]:
+                    if st.checkbox(tx_type, value=True, key=f"tx_{tx_type}"):
+                        selected_types.append(tx_type)
+
+            # Filter based on selected checkboxes
+            if selected_types:
+                filtered_log = transaction_log[transaction_log['Type'].isin(selected_types)].copy()
             else:
-                filtered_log = transaction_log
+                filtered_log = transaction_log.copy()
+
+            # Add running index column
+            filtered_log.insert(0, '#', range(1, len(filtered_log) + 1))
 
             st.dataframe(
-                filtered_log[['Date', 'Type', 'Details', 'Leverage', 'Equity', 'Daily P&L']],
+                filtered_log[['#', 'Date', 'Type', 'Details', 'Leverage', 'Equity', 'Daily P&L']],
                 hide_index=True,
                 use_container_width=True,
                 height=300,
             )
 
-            st.caption(f"Total transactions: {len(filtered_log)} (showing {tx_filter.lower()})")
+            st.caption(f"Showing {len(filtered_log)} of {len(transaction_log)} transactions")
         else:
             st.info("No transactions recorded.")
 
