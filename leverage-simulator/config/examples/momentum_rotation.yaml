@@ -1,0 +1,37 @@
+# Momentum Rotation Strategy
+# Rotates into the best-performing asset based on 6-month momentum
+# Uses leverage only when SPY is in an uptrend
+
+data:
+  assets: [SPY, GLD, TLT, BIL]
+  start_date: "2008-01-01"
+  end_date: null
+
+portfolio:
+  mode: momentum_rotation
+  risky_assets: [SPY, GLD, TLT]
+  cash_asset: BIL
+  momentum_lookback: 126  # ~6 months
+  momentum_top_n: 1       # Hold only the best performer
+
+rebalance:
+  frequency: monthly
+
+leverage:
+  signal_asset: SPY
+  rule: "(SPY.close > SPY.SMA_200)"
+  target_leverage: 1.5
+  max_leverage: 2.0
+  broker_spread: 0.015
+  day_count: 360
+  maintenance_margin: 0.25
+  risk_off_to_cash: true
+
+indicators:
+  sma_windows: [20, 50, 200]
+  ema_windows: [12, 26]
+  rsi_period: 14
+
+simulation:
+  initial_equity: 100000
+  transaction_cost_bps: 0

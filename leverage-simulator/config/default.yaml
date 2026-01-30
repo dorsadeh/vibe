@@ -1,0 +1,38 @@
+# Default configuration for Leverage Simulator
+# This is a moderate leveraged 60/40 strategy with SMA trend filter
+
+data:
+  assets: [SPY, GLD, TLT, BIL]
+  start_date: "2008-01-01"
+  end_date: null  # null = use latest available
+
+portfolio:
+  mode: fixed_weights  # or momentum_rotation
+  weights:
+    SPY: 0.6
+    GLD: 0.2
+    TLT: 0.2
+  risky_assets: [SPY, GLD, TLT]
+  cash_asset: BIL
+
+rebalance:
+  frequency: monthly  # daily, weekly, monthly, or N_days (e.g., 63_days)
+
+leverage:
+  signal_asset: SPY
+  rule: "(SPY.close > SPY.SMA_200) AND (SPY.RSI_14 < 70)"
+  target_leverage: 1.5
+  max_leverage: 2.0
+  broker_spread: 0.015  # 1.5% over base rate
+  day_count: 360        # 360 or 252
+  maintenance_margin: 0.25
+  risk_off_to_cash: true
+
+indicators:
+  sma_windows: [20, 50, 200]
+  ema_windows: [12, 26]
+  rsi_period: 14
+
+simulation:
+  initial_equity: 100000
+  transaction_cost_bps: 0

@@ -1,0 +1,38 @@
+# Conservative Low-Leverage Strategy
+# Diversified portfolio with minimal leverage and strict risk controls
+
+data:
+  assets: [SPY, GLD, TLT, BIL]
+  start_date: "2008-01-01"
+  end_date: null
+
+portfolio:
+  mode: fixed_weights
+  weights:
+    SPY: 0.40
+    GLD: 0.20
+    TLT: 0.40
+  risky_assets: [SPY, GLD, TLT]
+  cash_asset: BIL
+
+rebalance:
+  frequency: monthly
+
+leverage:
+  signal_asset: SPY
+  rule: "(SPY.close > SPY.SMA_200) AND (SPY.SMA_50 > SPY.SMA_200) AND (SPY.RSI_14 < 65)"
+  target_leverage: 1.25  # Only 1.25x leverage
+  max_leverage: 1.5
+  broker_spread: 0.015
+  day_count: 360
+  maintenance_margin: 0.30  # Higher margin requirement
+  risk_off_to_cash: true
+
+indicators:
+  sma_windows: [20, 50, 200]
+  ema_windows: [12, 26]
+  rsi_period: 14
+
+simulation:
+  initial_equity: 100000
+  transaction_cost_bps: 5  # Include small transaction costs

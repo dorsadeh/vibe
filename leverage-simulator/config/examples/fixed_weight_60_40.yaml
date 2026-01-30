@@ -1,0 +1,38 @@
+# Classic 60/40 with Leverage Timing
+# Traditional stock/bond allocation with leverage based on trend
+
+data:
+  assets: [SPY, GLD, TLT, BIL]
+  start_date: "2008-01-01"
+  end_date: null
+
+portfolio:
+  mode: fixed_weights
+  weights:
+    SPY: 0.6
+    TLT: 0.4
+    GLD: 0.0
+  risky_assets: [SPY, TLT]
+  cash_asset: BIL
+
+rebalance:
+  frequency: monthly
+
+leverage:
+  signal_asset: SPY
+  rule: "(SPY.SMA_50 > SPY.SMA_200) AND (SPY.RSI_14 < 70)"
+  target_leverage: 1.5
+  max_leverage: 1.5
+  broker_spread: 0.015
+  day_count: 360
+  maintenance_margin: 0.25
+  risk_off_to_cash: false  # Stay invested at 1x when signal OFF
+
+indicators:
+  sma_windows: [20, 50, 200]
+  ema_windows: [12, 26]
+  rsi_period: 14
+
+simulation:
+  initial_equity: 100000
+  transaction_cost_bps: 0

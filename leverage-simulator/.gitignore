@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+ENV/
+.venv/
+
+# Data cache
+data/*.parquet
+data/*.meta
+data/*.csv
+!data/.gitkeep
+
+# Exports
+exports/*.csv
+exports/*.xlsx
+!exports/.gitkeep
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Pytest
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Streamlit
+.streamlit/
+
+# Jupyter
+.ipynb_checkpoints/
