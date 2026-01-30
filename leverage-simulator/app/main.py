@@ -488,6 +488,15 @@ initial_equity = st.sidebar.number_input("Initial Equity ($)", 10_000, 10_000_00
 # Run button
 run_backtest = st.sidebar.button("🚀 Run Backtest", type="primary", use_container_width=True)
 
+# Initialize session state for backtest results
+if "backtest_result" not in st.session_state:
+    st.session_state.backtest_result = None
+    st.session_state.backtest_metrics = None
+    st.session_state.backtest_benchmark_metrics = None
+    st.session_state.backtest_config = None
+    st.session_state.backtest_spy_prices = None
+    st.session_state.backtest_initial_equity = None
+
 # Main content
 if run_backtest:
     # Build config
@@ -547,11 +556,31 @@ if run_backtest:
             spy_prices = data[(signal_asset, "adj_close")].loc[result.equity_curve.index]
             benchmark_metrics = compute_benchmark_metrics(spy_prices, initial_equity)
 
+            # Store in session state
+            st.session_state.backtest_result = result
+            st.session_state.backtest_metrics = metrics
+            st.session_state.backtest_benchmark_metrics = benchmark_metrics
+            st.session_state.backtest_config = config
+            st.session_state.backtest_spy_prices = spy_prices
+            st.session_state.backtest_initial_equity = initial_equity
+
             st.success("Backtest completed!")
 
         except Exception as e:
             st.error(f"Backtest failed: {e}")
-            st.stop()
+            st.session_state.backtest_result = None  # Clear on error
+
+# Display results if available in session state
+if st.session_state.backtest_result is not None:
+    # Retrieve from session state
+    result = st.session_state.backtest_result
+    metrics = st.session_state.backtest_metrics
+    benchmark_metrics = st.session_state.backtest_benchmark_metrics
+    config = st.session_state.backtest_config
+    spy_prices = st.session_state.backtest_spy_prices
+    initial_equity = st.session_state.backtest_initial_equity
+    signal_asset = config.signal_asset
+    leverage_rule = config.leverage_rule
 
     # Display results
     tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
