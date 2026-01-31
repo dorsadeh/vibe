@@ -496,6 +496,9 @@ if "backtest_result" not in st.session_state:
     st.session_state.backtest_config = None
     st.session_state.backtest_spy_prices = None
     st.session_state.backtest_initial_equity = None
+    # No-rules benchmark (constant leverage)
+    st.session_state.no_rules_result = None
+    st.session_state.no_rules_metrics = None
 
 # Main content
 if run_backtest:
@@ -537,6 +540,7 @@ if run_backtest:
     # Run backtest
     with st.spinner("Running backtest..."):
         try:
+            # Run main strategy backtest
             engine = BacktestEngine(data, returns, config)
             result = engine.run()
 
@@ -556,6 +560,35 @@ if run_backtest:
             spy_prices = data[(signal_asset, "adj_close")].loc[result.equity_curve.index]
             benchmark_metrics = compute_benchmark_metrics(spy_prices, initial_equity)
 
+            # Run no-rules benchmark (constant leverage - always ON)
+            no_rules_config = BacktestConfig(
+                initial_equity=initial_equity,
+                start_date=str(start_date),
+                end_date=str(end_date),
+                leverage=LeverageConfig(
+                    max_leverage=max_leverage,
+                    broker_spread=broker_spread,
+                    day_count=360,
+                    maintenance_margin=maintenance_margin,
+                    risk_off_to_cash=False,  # Never go to cash
+                ),
+                portfolio=portfolio_config,
+                rebalance=RebalanceConfig(frequency=rebalance_freq),
+                signal_asset=signal_asset,
+                leverage_rule=f"({signal_asset}.close > 0)",  # Always true
+                target_leverage=target_leverage,
+            )
+            no_rules_engine = BacktestEngine(data, returns, no_rules_config)
+            no_rules_result = no_rules_engine.run()
+
+            no_rules_metrics = compute_metrics(
+                equity_curve=no_rules_result.equity_curve,
+                leverage_series=no_rules_result.leverage_series,
+                cumulative_interest=no_rules_result.cumulative_interest,
+                margin_events=no_rules_result.margin_events,
+                risk_free_rate=rate_series,
+            )
+
             # Store in session state
             st.session_state.backtest_result = result
             st.session_state.backtest_metrics = metrics
@@ -563,12 +596,15 @@ if run_backtest:
             st.session_state.backtest_config = config
             st.session_state.backtest_spy_prices = spy_prices
             st.session_state.backtest_initial_equity = initial_equity
+            st.session_state.no_rules_result = no_rules_result
+            st.session_state.no_rules_metrics = no_rules_metrics
 
             st.success("Backtest completed!")
 
         except Exception as e:
             st.error(f"Backtest failed: {e}")
             st.session_state.backtest_result = None  # Clear on error
+            st.session_state.no_rules_result = None
 
 # Display results if available in session state
 if st.session_state.backtest_result is not None:
@@ -581,6 +617,9 @@ if st.session_state.backtest_result is not None:
     initial_equity = st.session_state.backtest_initial_equity
     signal_asset = config.signal_asset
     leverage_rule = config.leverage_rule
+    # No-rules benchmark
+    no_rules_result = st.session_state.no_rules_result
+    no_rules_metrics = st.session_state.no_rules_metrics
 
     # Display results
     tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
@@ -606,15 +645,24 @@ if st.session_state.backtest_result is not None:
         col1, col2 = st.columns(2)
 
         with col1:
-            st.markdown("### Strategy vs Benchmark")
+            st.markdown("### Strategy Comparison")
             comparison_df = pd.DataFrame({
-                "Metric": ["CAGR", "Volatility", "Max Drawdown", "Sharpe", "Calmar"],
-                "Strategy": [
+                "Metric": ["CAGR", "Volatility", "Max Drawdown", "Sharpe", "Calmar", "Interest Paid"],
+                "With Rules": [
                     f"{metrics.cagr*100:.2f}%",
                     f"{metrics.volatility*100:.1f}%",
                     f"{metrics.max_drawdown*100:.1f}%",
                     f"{metrics.sharpe_ratio:.2f}",
                     f"{metrics.calmar_ratio:.2f}",
+                    f"${metrics.total_interest_paid:,.0f}",
+                ],
+                "Constant Leverage": [
+                    f"{no_rules_metrics.cagr*100:.2f}%",
+                    f"{no_rules_metrics.volatility*100:.1f}%",
+                    f"{no_rules_metrics.max_drawdown*100:.1f}%",
+                    f"{no_rules_metrics.sharpe_ratio:.2f}",
+                    f"{no_rules_metrics.calmar_ratio:.2f}",
+                    f"${no_rules_metrics.total_interest_paid:,.0f}",
                 ],
                 f"{signal_asset} B&H": [
                     f"{benchmark_metrics.cagr*100:.2f}%",
@@ -622,6 +670,7 @@ if st.session_state.backtest_result is not None:
                     f"{benchmark_metrics.max_drawdown*100:.1f}%",
                     f"{benchmark_metrics.sharpe_ratio:.2f}",
                     f"{benchmark_metrics.calmar_ratio:.2f}",
+                    "$0",
                 ],
             })
             st.dataframe(comparison_df, hide_index=True, use_container_width=True)
@@ -629,12 +678,16 @@ if st.session_state.backtest_result is not None:
         with col2:
             st.markdown("### Leverage Statistics")
             lev_df = pd.DataFrame({
-                "Metric": ["Avg Leverage", "% Time Leveraged", "% Time in Cash", "Margin Calls"],
-                "Value": [
+                "Metric": ["Avg Leverage", "% Time Leveraged", "Margin Calls"],
+                "With Rules": [
                     f"{metrics.avg_leverage:.2f}x",
                     f"{metrics.pct_time_leveraged*100:.1f}%",
-                    f"{(1-metrics.pct_time_leveraged-(result.leverage_series==1).mean())*100:.1f}%",
                     f"{metrics.margin_calls}",
+                ],
+                "Constant Leverage": [
+                    f"{no_rules_metrics.avg_leverage:.2f}x",
+                    f"{no_rules_metrics.pct_time_leveraged*100:.1f}%",
+                    f"{no_rules_metrics.margin_calls}",
                 ],
             })
             st.dataframe(lev_df, hide_index=True, use_container_width=True)
@@ -817,13 +870,24 @@ if st.session_state.backtest_result is not None:
             go.Scatter(
                 x=result.equity_curve.index,
                 y=result.equity_curve.values,
-                name="Strategy Equity",
+                name="With Rules",
                 line=dict(color="#2196F3", width=2),  # Bright blue
             ),
             row=equity_row, col=1
         )
 
-        # Benchmark
+        # Constant leverage (no rules) benchmark
+        fig.add_trace(
+            go.Scatter(
+                x=no_rules_result.equity_curve.index,
+                y=no_rules_result.equity_curve.values,
+                name="Constant Leverage",
+                line=dict(color="#FF9800", width=2, dash="dot"),  # Orange dotted
+            ),
+            row=equity_row, col=1
+        )
+
+        # SPY Benchmark
         benchmark_equity = spy_prices / spy_prices.iloc[0] * initial_equity
         fig.add_trace(
             go.Scatter(
@@ -1106,9 +1170,19 @@ if st.session_state.backtest_result is not None:
             go.Scatter(
                 x=result.drawdown_series.index,
                 y=result.drawdown_series.values * 100,
-                name="Drawdown",
+                name="With Rules",
                 fill="tozeroy",
-                line=dict(color="red"),
+                line=dict(color="#2196F3"),  # Blue
+                fillcolor="rgba(33, 150, 243, 0.3)",
+            )
+        )
+
+        fig.add_trace(
+            go.Scatter(
+                x=no_rules_result.drawdown_series.index,
+                y=no_rules_result.drawdown_series.values * 100,
+                name="Constant Leverage",
+                line=dict(color="#FF9800", dash="dot", width=2),  # Orange dotted
             )
         )
 
@@ -1163,9 +1237,19 @@ if st.session_state.backtest_result is not None:
             go.Scatter(
                 x=result.leverage_series.index,
                 y=result.leverage_series.values,
-                name="Leverage Factor",
+                name="With Rules",
                 fill="tozeroy",
-                line=dict(color="orange"),
+                line=dict(color="#2196F3"),
+                fillcolor="rgba(33, 150, 243, 0.3)",
+            )
+        )
+
+        fig.add_trace(
+            go.Scatter(
+                x=no_rules_result.leverage_series.index,
+                y=no_rules_result.leverage_series.values,
+                name="Constant Leverage",
+                line=dict(color="#FF9800", dash="dot", width=2),
             )
         )
 
@@ -1177,15 +1261,16 @@ if st.session_state.backtest_result is not None:
 
         st.plotly_chart(fig, use_container_width=True)
 
-        # Leverage distribution
+        # Leverage distribution comparison
         col1, col2 = st.columns(2)
 
         with col1:
+            st.markdown("### With Rules - Leverage Distribution")
             lev_counts = result.leverage_series.value_counts().sort_index()
             fig = go.Figure(data=[
-                go.Bar(x=lev_counts.index.astype(str), y=lev_counts.values)
+                go.Bar(x=lev_counts.index.astype(str), y=lev_counts.values, marker_color="#2196F3")
             ])
-            fig.update_layout(title="Leverage Distribution", xaxis_title="Leverage", yaxis_title="Days")
+            fig.update_layout(xaxis_title="Leverage", yaxis_title="Days")
             st.plotly_chart(fig, use_container_width=True)
 
         with col2:
@@ -1204,40 +1289,54 @@ if st.session_state.backtest_result is not None:
             st.plotly_chart(fig, use_container_width=True)
 
     with tab6:
-        # Interest costs
-        col1, col2 = st.columns(2)
-
-        with col1:
-            fig = go.Figure()
-            fig.add_trace(
-                go.Scatter(
-                    x=result.cumulative_interest.index,
-                    y=result.cumulative_interest.values,
-                    name="Cumulative Interest",
-                    fill="tozeroy",
-                    line=dict(color="purple"),
-                )
+        # Interest costs comparison
+        fig = go.Figure()
+        fig.add_trace(
+            go.Scatter(
+                x=result.cumulative_interest.index,
+                y=result.cumulative_interest.values,
+                name="With Rules",
+                fill="tozeroy",
+                line=dict(color="#2196F3"),
+                fillcolor="rgba(33, 150, 243, 0.3)",
             )
-            fig.update_layout(title="Cumulative Interest Paid", yaxis_title="Interest ($)", height=400)
-            st.plotly_chart(fig, use_container_width=True)
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=no_rules_result.cumulative_interest.index,
+                y=no_rules_result.cumulative_interest.values,
+                name="Constant Leverage",
+                line=dict(color="#FF9800", dash="dot", width=2),
+            )
+        )
+        fig.update_layout(title="Cumulative Interest Paid", yaxis_title="Interest ($)", height=400)
+        st.plotly_chart(fig, use_container_width=True)
 
-        with col2:
-            # Monthly interest
-            monthly_interest = result.interest_series.resample("ME").sum()
-            fig = go.Figure(data=[
-                go.Bar(x=monthly_interest.index, y=monthly_interest.values)
-            ])
-            fig.update_layout(title="Monthly Interest Paid", yaxis_title="Interest ($)", height=400)
-            st.plotly_chart(fig, use_container_width=True)
-
-        # Interest summary
+        # Interest summary comparison
         st.markdown("### Interest Summary")
-        col1, col2, col3 = st.columns(3)
-        col1.metric("Total Interest", f"${result.cumulative_interest.iloc[-1]:,.2f}")
-        col2.metric("Avg Daily Interest", f"${result.interest_series.mean():.2f}")
-        col3.metric("Interest as % of Return",
-                   f"{result.cumulative_interest.iloc[-1] / (result.equity_curve.iloc[-1] - initial_equity) * 100:.1f}%"
-                   if result.equity_curve.iloc[-1] > initial_equity else "N/A")
+        interest_df = pd.DataFrame({
+            "Metric": ["Total Interest", "Avg Daily Interest", "Interest as % of Return"],
+            "With Rules": [
+                f"${result.cumulative_interest.iloc[-1]:,.2f}",
+                f"${result.interest_series.mean():.2f}",
+                f"{result.cumulative_interest.iloc[-1] / max(result.equity_curve.iloc[-1] - initial_equity, 1) * 100:.1f}%"
+                if result.equity_curve.iloc[-1] > initial_equity else "N/A",
+            ],
+            "Constant Leverage": [
+                f"${no_rules_result.cumulative_interest.iloc[-1]:,.2f}",
+                f"${no_rules_result.interest_series.mean():.2f}",
+                f"{no_rules_result.cumulative_interest.iloc[-1] / max(no_rules_result.equity_curve.iloc[-1] - initial_equity, 1) * 100:.1f}%"
+                if no_rules_result.equity_curve.iloc[-1] > initial_equity else "N/A",
+            ],
+        })
+        st.dataframe(interest_df, hide_index=True, use_container_width=True)
+
+        # Interest saved by using rules
+        interest_saved = no_rules_result.cumulative_interest.iloc[-1] - result.cumulative_interest.iloc[-1]
+        if interest_saved > 0:
+            st.success(f"💰 Rules saved **${interest_saved:,.2f}** in interest costs compared to constant leverage")
+        else:
+            st.info(f"Interest difference: ${abs(interest_saved):,.2f}")
 
     # Export data
     st.markdown("---")
